@@ -1,0 +1,521 @@
+---
+title: "RNAexpr Survival analysis BRCA"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, root.dir = "/home/deborah/Home")
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(survival)
+library(survminer)
+#library(psych)
+library(dplyr)
+library(stringr)
+library(data.table)
+#library(tableone)
+library(knitr)
+library(kableExtra)
+```
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+################ KM curves
+plot_surv=function(x,Df,subset,tit){
+    t='end'
+    my.formula<-as.formula(paste("Surv(time=",t,",event=",event,")~",x,sep=''))
+    sd <- survdiff(my.formula, data = Df[subset,])
+    p.val.KM<-1 - pchisq(sd$chisq, length(sd$n) - 1)
+    p.val.KM<-formatC(p.val.KM, format = "e", digits = 2)
+    surv_item= surv_fit(my.formula,data=Df[subset,])
+    ggsurv<-ggsurvplot(surv_item, data=Df[subset,], main = "Survival curve",
+               #fun = "cumhaz",
+              ggtheme = theme_bw(),xlim=c(0.8*min(Df[,t],na.rm = TRUE),round(max(Df[,t],na.rm = TRUE))),
+              legend.title = "CHD1L expr. levels: ",legend.labs = c("Mid", "Low","High"),legend = "right")
+    ggsurv$plot <- ggsurv$plot+
+      annotate("text",x=round(0.9*max(Df[,t],na.rm = TRUE)),y=0.7,label=paste("P.val=",p.val.KM,sep=''),size=4)+
+      xlab("Days since diagnosis")+
+      ggtitle(tit)
+    ggsurv
+    
+}
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+setwd("/home/deborah/Documents/Crick/Projects/Coxph_RNA")
+  #"/home/schneid/Documents/Crick/Projects/Coxph_RNA")
+
+df_p.BRCA<-read.table(
+  "BRCA_expression_survival_Mar2020.txt",
+  sep="\t", header=TRUE)
+
+#################################
+receptors<-c('ER_status','PR_status','HER2_status')#,'her2_outcome')
+
+rownames(df_p.BRCA)<-df_p.BRCA$PatientID
+df_p.BRCA$STATUS<-as.factor(df_p.BRCA$STATUS)
+df_p.BRCA<-df_p.BRCA[df_p.BRCA$TIME>0,]
+
+#################################
+#################### downloaded from TCGA 18/04/20
+df_p.BRCA.or<-read.table(
+   "BRCA_clinical_042020.tsv",
+   sep="\t",fill=TRUE, header=TRUE)
+r#################### downloaded from TCGA 18/04/20
+################################
+keep.3<-c("submitter_id","vital_status","days_tobirth","days_to_last_follow_up","days_to_death")
+df_p.BRCA.or<-df_p.BRCA.or[,keep.3]
+for(col in c("days_to_birth","days_to_last_follow_up","days_to_death")){
+ df_p.BRCA.or[,col]<-as.numeric(levels(df_p.BRCA.or[,col])[df_p.BRCA.or[,col]])
+}
+df_p.BRCA.or<-df_p.BRCA.or[!duplicated(df_p.BRCA.or$submitter_id),]
+#
+df_p.BRCA.or<-df_p.BRCA.or[!is.na(df_p.BRCA.or$days_to_birth),]
+df_p.BRCA.or$Age.yr<-(-1)*df_p.BRCA.or$days_to_birth/365
+#
+df_p.BRCA.or$end<-ifelse(df_p.BRCA.or$vital_status=="Alive",df_p.BRCA.or$days_to_last_follow_up,df_p.BRCA.or$days_to_death)
+df_p.BRCA.or<-df_p.BRCA.or[(!is.na(df_p.BRCA.or$end))&(df_p.BRCA.or$end>0),]
+df_p.BRCA.or$end.yr<-df_p.BRCA.or$end/365+df_p.BRCA.or$Age.y
+
+
+######
+all.genes<-fread(
+  "BRCA_tumouronly.RSEM_genes_normalized_data.txt",
+  sep="\t", select=1)
+
+# ## find genes of interest
+genes<-c('ATM','BRCA1','BRCA2','CHD1L')
+c1<-lapply(genes, function(x) grep(x, all.genes$ID))
+tmp<-(all.genes$ID[unlist(c1[1])]=='ATM')
+c1[1]<-unlist(c1[1])[tmp]
+c1=unlist(c1)
+
+df_rsem.BRCA<-fread(
+  "BRCA_tumouronly.RSEM_genes_normalized_data.txt",
+  sep="\t",header = TRUE)
+
+# #
+df_rsem.BRCA=df_rsem.BRCA[c1,]
+df_rsem.BRCA=as.data.frame(t(df_rsem.BRCA))
+colnames(df_rsem.BRCA)<-genes
+rownames(df_rsem.BRCA)<-str_replace_all(rownames(df_rsem.BRCA),"[.]", "-")
+df_rsem.BRCA=df_rsem.BRCA[-1,]
+indx <- sapply(df_rsem.BRCA, is.factor)
+df_rsem.BRCA[indx] <- lapply(df_rsem.BRCA[indx], function(x) as.numeric(as.character(x)))
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+rownames(df_rsem.BRCA)<-str_sub(rownames(df_rsem.BRCA),end=12)
+Ids=intersect(rownames(df_p.BRCA),rownames(df_rsem.BRCA))
+rownames(df_p.BRCA.or)<-df_p.BRCA.or$submitter_id
+Ids.1<-intersect(rownames(df_p.BRCA.or),rownames(df_rsem.BRCA))
+
+#### Merge 
+Df.BRCA<-merge(df_p.BRCA.or,df_rsem.BRCA,by="row.names")
+rownames(Df.BRCA)<-Df.BRCA$Row.names
+rownames(df_p.BRCA)<-df_p.BRCA$PatientID
+Df.BRCA<-merge(Df.BRCA,df_p.BRCA[,receptors],by="row.names")
+
+
+### Fix RNA expr vars.
+for(g in genes){
+  Df.BRCA[,g]<-as.numeric(as.character(Df.BRCA[,g]))
+}
+
+#### create cat. of RNA expr. 
+for(var in genes[-1]){
+  Df.BRCA$tmp=cut(Df.BRCA[,var],breaks=quantile(Df.BRCA[,var],c(0,0.25,0.75,1))) # split around quarters 
+  levels(Df.BRCA$tmp)<-c('low','mid','high')
+  Df.BRCA$tmp<-relevel(Df.BRCA$tmp, ref='mid')
+  new_var<-paste(var,'_cat',sep='')
+  ncols=length(colnames(Df.BRCA))
+  colnames(Df.BRCA)[ncols]<-new_var
+}
+# split ATM around median
+Df.BRCA$ATM_cat<-cut(Df.BRCA$ATM,breaks=quantile(Df.BRCA$ATM,c(0,0.5,1)))
+levels(Df.BRCA$ATM_cat)<-c('low','high')
+Df.BRCA$ATM_cat<-relevel(Df.BRCA$ATM_cat, ref='low')
+#
+Df.BRCA$HRD<-ifelse((Df.BRCA$BRCA1_cat=='low')|(Df.BRCA$BRCA2_cat=='low' ),1,0)
+Df.BRCA<-Df.BRCA[!is.na(Df.BRCA$HRD),]
+#
+Df.BRCA$over65<-ifelse(Df.BRCA$Age.yr>=65,1,0)
+
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+levels(Df.BRCA$vital_status)<-c(0,1) #0 alive -no event - 1 dead - event
+
+##### surv items set here #####
+event="vital_status"
+t="Age.yr,time2=end.yr"
+
+surv.gen<-paste("Surv(time=",t,",event=",event,")~",sep='')
+```
+
+## Cohort description
+Cohort description
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+genes_cat=lapply(genes, function(x) paste(x,"_cat",sep=''))
+
+Df.table<-Df.BRCA
+Df.table<-Df.table[,colnames(Df.table) != "Row.names"]
+Df.table<-Df.table %>% 
+  rename( Dead=vital_status, Censoring_Time=end, Censoring_age=end.yr)
+varstofact<-unlist(c("Dead","over65","HRD",receptors))
+Df.table[varstofact] <- lapply(Df.table[varstofact], factor)
+Vars<-c(varstofact,"Age.yr","Censoring_Time","Censoring_age",genes)
+tableOne <- CreateTableOne(vars = Vars,data=Df.table)
+
+T1<-kableone(tableOne)
+
+T1 %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+#### HRD status: low expr of BRCA 1 or 2 
+```
+
+Categories of gene expression:
+
+* CHD1L, BRCA1 and BRCA2: low = bottom 25% of data sample. Mid: median 50% of sample. High: top 25% of sample
+* ATM: low= bottom 50%; High= top 50%. Median = `r median(Df.BRCA$ATM) `
+
+In subsequent regression analyses, the mid category for CHD1L, BRCA1 and BRCA2 is used as the reference category. For ATM gene expression, the low category is used as reference
+
+HRD status is defined as having a low expression profile for BRCA1 AND/OR BRCA2 genes (bottom 25% of sample for either or both genes)
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+qs<-lapply(Df.BRCA[,genes],function(x) quantile(x,c(0,0.25,0.75,1)))
+d.qs <- data.frame(matrix(unlist(qs), nrow=length(qs), byrow=T))
+colnames(d.qs)<-c('min','bottom 25%','top 25%','max')
+rownames(d.qs)<-genes
+
+signif(d.qs,3) %>%
+   kable() %>%
+   kable_styling()
+  
+```
+### Exclusion criteria
+
+Patients were removed from the analysis if they had any of the following:
+
+* missing date of birth
+* missing survival information (no death date + no last follow-up date + no vital status information)
+
+## Logit regression on HRD status - association with CHD1L gene expression
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+stdev=sd(Df.BRCA$CHD1L)
+pretty_pres<-function(x,stdev){ 
+  x <- summary(x)
+  p.value<-signif(x$coefficients[,4], digits=2)
+  wald.test<-signif(x$coefficients[,3], digits=2)
+  beta<-signif(x$coefficients[,1], digits=3);#coeficient beta
+  HR <- signif(exp(beta*stdev),4)
+  res<-as.data.frame(cbind(HR, p.value))
+  colnames(res)<-c("OR", 
+                "p.value")
+  return(res)
+}
+
+logit.model<-"HRD~CHD1L+Age.yr"
+logit.res<-glm(as.formula(logit.model),data=Df.BRCA,family = 'binomial')
+#
+pretty_pres(logit.res,stdev) %>%
+     kable(caption = "Logistic regression: HRD status vs CHD1L expr.") %>%
+   kable_styling()
+
+#
+Df.plot<-Df.BRCA
+Df.plot$HRD<-as.factor(Df.plot$HRD)
+#
+ttest.hrd<-t.test(CHD1L~HRD,data=Df.plot)
+pp<-formatC(ttest.hrd$p.value, format = "e", digits = 2)
+#
+gg1<-ggplot(Df.plot[,-2],aes(x=HRD,y=CHD1L,fill=HRD))+
+  geom_boxplot()+
+  ylim(0,2000)+
+  #geom_smooth(method='glm', formula= y~x)+
+  annotate(geom="text",x=2, y=1, label=paste("P.val=",pp,sep=''))+
+  annotate(geom="text",x=1, y=1500, label=paste("Mean=",signif(ttest.hrd$estimate[1],4),sep=''))+
+  annotate(geom="text",x=2, y=1500, label=paste("Mean=",signif(ttest.hrd$estimate[2],4),sep=''))
+gg1
+
+```
+
+### Association between ATM x CHD1L
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#
+lm1<-summary(lm('CHD1L~ATM',data=Df.plot))
+pp2<-lm1$coefficients[2,c(1,4)]
+
+#
+gg2<-ggplot(Df.plot[,-2],aes(x=ATM,y=CHD1L))+
+  geom_point()+
+  #ylim(0,2000)+
+  geom_smooth(method='glm', formula= y~x)+
+  annotate(geom="text",x=5000, y=2500, label=paste("Cor=",signif(pp2[1],3),', P.val=',signif(pp2[2],4),sep=''))
+gg2
+```
+
+### Association  between BRCA2 x CHD1L
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+lm2<-summary(lm('CHD1L~BRCA1*BRCA2',data=Df.plot))
+pp3<-lm2$coefficients[c(2,3),c(1,4)]
+corr<-formatC(pp3[,1],digits=3)
+pp3[,2]<-formatC(pp3[,2], format = "e", digits = 2)
+#
+gg2<-ggplot(Df.plot[,-2],aes(x=BRCA2,y=CHD1L))+
+  geom_point()+
+  #ylim(0,2000)+
+  geom_smooth(method='lm', formula= y~x)+
+  annotate(geom="text",x=500, y=7500, label=paste("Cor=",corr[2],', P.val=',pp3[2,2],sep=''))
+gg2
+#BRCA2
+lm.brca2<-summary(lm('CHD1L~BRCA2_cat',data=Df.plot))
+pp4<-lm.brca2$coefficients[,4]
+pp4<-formatC(pp4, format = "e", digits = 2)
+ggplot(Df.plot[,-2],aes(x=BRCA2_cat,y=CHD1L,fill=BRCA2_cat))+
+  geom_boxplot()+
+  ylim(0,2000)+
+  annotate(geom="text",x=2, y=0, label=paste('P.val=',pp4[2],sep=''))+
+  annotate(geom="text",x=3, y=0, label=paste('P.val=',pp4[3],sep=''))
+```
+
+### Association  between BRCA1 x CHD1L
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+Df.plot<-Df.plot[!is.na(Df.plot$BRCA1_cat),]
+gg2<-ggplot(Df.plot[,-2],aes(x=BRCA1,y=CHD1L))+
+  geom_point()+
+  #ylim(0,2000)+
+  geom_smooth(method='lm', formula= y~x)+
+  annotate(geom="text",x=500, y=7500, label=paste("Cor=",corr[1],', P.val=',pp3[1,2],sep=''))
+gg2
+#BRCA2
+lm.brca2<-summary(lm('CHD1L~BRCA1_cat',data=Df.plot))
+pp4<-lm.brca2$coefficients[,4]
+pp4<-formatC(pp4, format = "e", digits = 2)
+ggplot(Df.plot[,-2],aes(x=BRCA1_cat,y=CHD1L,fill=BRCA1_cat))+
+  geom_boxplot()+
+  ylim(0,2000)+
+  annotate(geom="text",x=2, y=0, label=paste('P.val=',pp4[2],sep=''))+
+  annotate(geom="text",x=3, y=0, label=paste('P.val=',pp4[3],sep=''))
+```
+
+## Cox survival analyses
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#
+genes_cat=lapply(genes, function(x) paste(x,"_cat",sep=''))
+Df.model<-Df.BRCA[,unlist(c("vital_status","Age.yr","end","end.yr",'HRD',
+                            'over65',genes,genes_cat,receptors))]
+levels(Df.model$vital_status)<-c(0,1)
+Df.model$vital_status<-as.numeric(Df.model$vital_status)-1
+Df.model$HRD<-as.factor(Df.model$HRD)
+
+pretty_pres_coxph<-function(x){ 
+  x <- summary(x)
+  p.value<-signif(x$coefficients[,5], digits=2)
+  wald.test<-signif(x$coefficients[,4], digits=2)
+  beta<-signif(x$coefficients[,1], digits=3);#coeficient beta
+  HR <-signif(x$coefficients[,2], digits=3);#exp(beta)
+  HR.confint.lower <- signif(x$conf.int[,"lower .95"],3) #signif( ,2)
+  HR.confint.upper <- signif(x$conf.int[,"upper .95"],3)
+  HR <- paste0(HR, " (", 
+               HR.confint.lower, "-", HR.confint.upper, ")")
+  res<-as.data.frame(cbind(HR, p.value))
+  colnames(res)<-c("HR (95% CI for HR)", 
+                "p.value")
+  return(res)
+}
+
+split_cat_plot<-function(x,names_2){
+  if(x=='mid'){
+    keep<-unlist(lapply(names_2, function(x) str_count(x,"-")))
+    keep<-which(keep==1)
+    names.low<-names_2[keep]
+    names.low<-setdiff(names.low,grep("CHD1L",names.low,value=TRUE))
+    df<-res[res$Variables %in% names.low,]
+    gene<-unlist(str_split(names.low[1],'-'))[1]
+    names.low.2<-c(names.low,paste(gene,'-mid',sep=''))
+    cat="CHD1L-mid"
+  }else{
+    cat<-paste("CHD1L-",x,sep='')
+    names.low<-grep(cat,names_2,value = TRUE)
+    names.low.2<-gsub(paste("(",cat,")[a-zA-Z1-2-]",sep=''),'',names.low)[-1]
+    gene<-unlist(str_split(names.low.2[1],'-'))[1]
+    names.low.2<-c(paste(gene,'-mid',sep=''),names.low.2)
+    df<-res[res$Variables %in% names.low,]
+  }
+  #
+  df$Variables<-droplevels(df$Variables)
+  levels(df$Variables)<-names.low.2
+  # if(x=='mid'){
+  #   df<-rbind(df,c(names.low.2[3],1,1,1))
+  # }
+  G<-ggplot(df,aes(x=Variables,y=HR))+geom_point(colour = "red", size = 3)+
+    geom_point(aes(x=Variables,y=LL))+
+    geom_point(aes(x=Variables,y=UL))+
+    geom_hline(yintercept = 1)+
+    #theme(axis.text.x = element_text(angle = 90))+
+    xlab('')+ggtitle(cat)
+  return(G)
+}
+
+pretty_plot_coxph<-function(x){ 
+  x <- summary(x)
+  p.value<-x$coefficients[,5]
+  res<-data.frame(Variables=rownames(x$coefficients))
+  res$HR <-as.numeric(x$coefficients[,2])
+  res$LL <- as.numeric(x$conf.int[,"lower .95"])
+  res$UL <- as.numeric(x$conf.int[,"upper .95"])
+  # res$p.value<-ifelse(p.value<0.001,'***',
+  #                 ifelse(p.value<0.01,'**',
+  #                        ifelse(p.value<0.05,'*','')))
+  #res<-melt(res)
+  names<-levels(res$Variables)
+  names_2<-str_split(names,"_cat|:")
+  names_2<-sapply(names_2,function(x) paste(x, collapse='-' ))
+  levels(res$Variables)<-names_2
+  #
+  gg.low<-split_cat_plot('low',names_2)
+  gg.high<-split_cat_plot('high',names_2)
+  gg.mid<-split_cat_plot('mid',names_2)
+  Gg<-ggarrange(gg.low,gg.mid,gg.high,ncol=3)
+  return(Gg)
+}
+#
+```
+
+### Cox survival analysis for BRCA Cancer - ATM x CHD1L
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+cox.0.atm<-coxph(as.formula(paste(surv.gen,' CHD1L_cat+ATM_cat',sep='')), data = Df.model) 
+
+cox.1.atm<-coxph(as.formula(paste(surv.gen,' CHD1L_cat*ATM_cat',sep='')), data = Df.model) 
+#ggforest(cox.1.atm)
+
+####
+res.cox.atm <- coxph(as.formula(paste(surv.gen,' CHD1L_cat*ATM_cat+HRD',sep='')), data = Df.model)
+
+res.atm<-anova(cox.0.atm,cox.1.atm)#,res.cox.atm)
+res.atm
+p.inter<-res.atm$`P(>|Chi|)`[2]
+tmp<-which(res.atm$`P(>|Chi|)`<0.05)
+if(length(tmp)==0){
+  ggforest(cox.0.atm)
+}else{
+ pretty_plot_coxph(cox.1.atm)
+}
+
+```
+
+P-value for effect of CHD1L X ATM on survival: `r formatC(p.inter, format = "e", digits = 2)`
+
+### Cox survival analysis for BRCA Cancer - HRD x CHD1:
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+cox.0.hrd<-coxph(as.formula(paste(surv.gen,' CHD1L_cat+HRD',sep='')), data = Df.model) 
+
+cox.1.hrd<-coxph(as.formula(paste(surv.gen,' CHD1L_cat*HRD',sep='')), data = Df.model) 
+
+res.cox.hrd <- coxph(as.formula(paste(surv.gen,' CHD1L_cat*HRD+ATM_cat',sep='')), data = Df.model) #=start,time2=
+
+res.hrd<-anova(cox.0.hrd,cox.1.hrd)#,res.cox.hrd)
+res.hrd
+p.inter<-res.hrd$`P(>|Chi|)`[2]
+tmp<-which(res.hrd$`P(>|Chi|)`<0.05)
+if(length(tmp)==0){
+  ggforest(cox.0.hrd)
+}else{
+ pretty_plot_coxph(cox.1.hrd)
+}
+```
+
+P-value for effect of CHD1L X HRD on survival: `r formatC(p.inter, format = "e", digits = 2)`
+
+### Cox survival analysis for BRCA Cancer - BRCA2 x CHD1L
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+cox.0.brca2<-coxph(as.formula(paste(surv.gen,' CHD1L_cat+BRCA2_cat',sep='')), data = Df.model) 
+
+cox.1.brca2<-coxph(as.formula(paste(surv.gen,' CHD1L_cat*BRCA2_cat',sep='')), data = Df.model) 
+
+res.brca2<-anova(cox.0.brca2,cox.1.brca2)
+res.brca2
+p.inter<-res.brca2$`P(>|Chi|)`[2]
+tmp<-which(res.brca2$`P(>|Chi|)`<0.05)
+if(length(tmp)==0){
+  ggforest(cox.0.brca2)
+# pretty_pres_coxph(res.cox) %>%
+#   kable() %>%
+#   kable_styling()
+}else{
+  pretty_plot_coxph(cox.1.brca2)
+  setEPS()
+  postscript("cox_BRCA2xACL1.eps",width = 10, height = 7)
+  pretty_plot_coxph(cox.1.brca2)
+  dev.off()
+}
+```
+
+P-value for effect of CHD1L X BRCA2 on survival: `r formatC(p.inter, format = "e", digits = 2)`
+
+### Cox survival analysis for BRCA Cancer - BRCA1 x CHD1L
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+cox.0.brca2<-coxph(as.formula(paste(surv.gen,' CHD1L_cat+BRCA1_cat',sep='')), data = Df.model) 
+
+cox.1.brca2<-coxph(as.formula(paste(surv.gen,' CHD1L_cat*BRCA1_cat',sep='')), data = Df.model) 
+
+res.brca2<-anova(cox.0.brca2,cox.1.brca2)
+res.brca2
+p.inter<-res.brca2$`P(>|Chi|)`[2]
+tmp<-which(res.brca2$`P(>|Chi|)`<0.05)
+if(length(tmp)==0){
+  ggforest(cox.0.brca2)
+}else{
+ pretty_plot_coxph(cox.1.brca2)
+}
+```
+
+P-value for effect of CHD1L X BRCA1 on survival: `r formatC(p.inter, format = "e", digits = 2)`
+
+## KM curves for all genes of interest + HRD status
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+lapply(genes_cat, function(x) plot_surv(x,Df.model))
+plot_surv('HRD',Df.model)
+```
+
+### KM curves for genes interaction
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width=12}
+Df.model$BRCA2_mid<-cut(Df.model$BRCA2,breaks=quantile(Df.model$BRCA2,c(0,0.5,1)))
+levels(Df.model$BRCA2_mid)<-c('low','high')
+Df.model$BRCA1_mid<-cut(Df.model$BRCA2,breaks=quantile(Df.model$BRCA1,c(0,0.5,1)))
+levels(Df.model$BRCA1_mid)<-c('low','high')
+Df.model$ATM_mid<-cut(Df.model$ATM,breaks=quantile(Df.model$ATM,c(0,0.5,1)))
+levels(Df.model$ATM_mid)<-c('low','high')
+  setEPS()
+  postscript("KM_BRCA2xACL1.eps",width = 10, height = 7)
+plot_surv('interaction(CHD1L_cat,BRCA2_cat)',Df.model,(Df.model$BRCA2_cat=='low'),"Low BRCA2 expr - bottom 33% of cohort")
+  dev.off()
+  setEPS()
+  postscript("KM_BRCA1xACL1.eps",width = 10, height = 7)
+plot_surv('interaction(CHD1L_cat,BRCA1_cat)',Df.model,(Df.model$BRCA1_cat=='low'),"Low BRCA1 expr - bottom 33% of cohort")
+    dev.off()
+setEPS()
+  postscript("KM_ATMxACL1.eps",width = 10, height = 7)
+plot_surv('interaction(CHD1L_cat,ATM_cat)',Df.model,(Df.model$ATM_cat=='low'),"Low ATM expr - bottom 33% of cohort")
+  dev.off()
+```
